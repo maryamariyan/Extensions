@@ -8,6 +8,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Microsoft.JSInterop.Internal;
 using Xunit;
 
 namespace Microsoft.JSInterop.Tests
@@ -237,6 +238,54 @@ namespace Microsoft.JSInterop.Tests
             var ex = Assert.Throws<ArgumentException>(
                 () => DotNetDispatcher.Invoke(null, "InvokableInstanceVoid", 1, null));
             Assert.StartsWith("There is no tracked object with id '1'.", ex.Message);
+        });
+
+        [Fact]
+        public Task CanInvokeMethodWithAsyncResult() => WithJSRuntime(jsRuntime =>
+        {
+            // This simulates the JSRuntimeBase.EndInvokeJS code-path
+            // Arrange
+            var testDTO = new TestDTO { StringVal = "Hello", IntVal = 4 };
+            var argsJson = JsonSerializer.Serialize(new object[] { 7, true, testDTO }, JsonSerializerOptionsProvider.Options);
+
+            // Act
+            var resultJson = DotNetDispatcher.Invoke(thisAssemblyName, nameof(SomePublicType.JAsyncResultTest), default, argsJson);
+
+            // Assert
+            var result = JsonSerializer.Deserialize<TestDTO>(resultJson, JsonSerializerOptionsProvider.Options);
+            Assert.Equal(testDTO.StringVal, result.StringVal);
+            Assert.Equal(testDTO.IntVal, result.IntVal);
+        });
+
+        [Fact]
+        public Task CanInvokeMethodWithAsyncResultForExceptionResult() => WithJSRuntime(jsRuntime =>
+        {
+            // This simulates the JSRuntimeBase.EndInvokeJS code-path for the failure case
+            // Arrange
+            var expected = "Some error";
+            var argsJson = JsonSerializer.Serialize(new object[] { 7, false, expected }, JsonSerializerOptionsProvider.Options);
+
+            // Act
+            var resultJson = DotNetDispatcher.Invoke(thisAssemblyName, nameof(SomePublicType.JAsyncResultTest), default, argsJson);
+
+            // Assert
+            var result = JsonSerializer.Deserialize<string>(resultJson, JsonSerializerOptionsProvider.Options);
+            Assert.Equal(expected, result);
+        });
+
+        [Fact]
+        public Task CanInvokeMethodWithAsyncResultForNullExceptionResult() => WithJSRuntime(jsRuntime =>
+        {
+            // This simulates the JSRuntimeBase.EndInvokeJS code-path for the failure case with a null exception
+            // Arrange
+            var argsJson = JsonSerializer.Serialize(new object[] { 7, false, null }, JsonSerializerOptionsProvider.Options);
+
+            // Act
+            var resultJson = DotNetDispatcher.Invoke(thisAssemblyName, nameof(SomePublicType.JAsyncResultTest), default, argsJson);
+
+            // Assert
+            var result = JsonSerializer.Deserialize<string>(resultJson, JsonSerializerOptionsProvider.Options);
+            Assert.Equal(string.Empty, result);
         });
 
         [Fact]
@@ -500,6 +549,14 @@ namespace Microsoft.JSInterop.Tests
                         IntVal = dtoByRef.IntVal * 2,
                     })
                 };
+            }
+
+            [JSInvokable]
+            public static object JAsyncResultTest(long taskId, bool success, JSAsyncCallResult asyncCallResult)
+            {
+                return success ?
+                    asyncCallResult.DeserializeResult(typeof(TestDTO)) :
+                    asyncCallResult.DeserializeError();
             }
         }
 

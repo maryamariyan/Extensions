@@ -24,13 +24,27 @@ namespace Microsoft.JSInterop
     /// </summary>
     internal sealed class JSAsyncCallResult
     {
-        internal JSAsyncCallResult(JsonDocument document, JsonElement jsonElement)
+        internal JSAsyncCallResult(ArraySegment<byte> segment, JsonReaderState state)
         {
-            JsonDocument = document;
-            JsonElement = jsonElement;
+            Segment = segment;
+            State = state;
         }
 
-        internal JsonElement JsonElement { get; }
-        internal JsonDocument JsonDocument { get; }
+        internal ArraySegment<byte> Segment { get; }
+        internal JsonReaderState State { get; }
+
+        internal object DeserializeResult(Type resultType)
+        {
+            var jsonReader = new Utf8JsonReader(Segment, isFinalBlock: false, State);
+            jsonReader.Read();
+            return JsonSerializer.Deserialize(ref jsonReader, resultType, JsonSerializerOptionsProvider.Options);
+    }
+
+        internal string DeserializeError()
+        {
+            var jsonReader = new Utf8JsonReader(Segment, isFinalBlock: false, State);
+            jsonReader.Read();
+            return jsonReader.TokenType == JsonTokenType.Null ? string.Empty : jsonReader.GetString();
+        }
     }
 }

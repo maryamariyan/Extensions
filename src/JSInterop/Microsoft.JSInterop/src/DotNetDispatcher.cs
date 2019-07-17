@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -172,74 +173,85 @@ namespace Microsoft.JSInterop
                 return Array.Empty<object>();
             }
 
-            // There's no direct way to say we want to deserialize as an array with heterogenous
-            // entry types (e.g., [string, int, bool]), so we need to deserialize in two phases.
-            var jsonDocument = JsonDocument.Parse(argsJson);
-            var shouldDisposeJsonDocument = true;
-            try
+            var utf8JsonBytes = Encoding.UTF8.GetBytes(argsJson);
+            var jsonSpan = utf8JsonBytes.AsSpan();
+            var reader = new Utf8JsonReader(jsonSpan);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray)
             {
-                if (jsonDocument.RootElement.ValueKind != JsonValueKind.Array)
-                {
-                    throw new ArgumentException($"Expected a JSON array but got {jsonDocument.RootElement.ValueKind}.");
-                }
-
-                var suppliedArgsLength = jsonDocument.RootElement.GetArrayLength();
-
-                if (suppliedArgsLength != parameterTypes.Length)
-                {
-                    throw new ArgumentException($"In call to '{methodIdentifier}', expected {parameterTypes.Length} parameters but received {suppliedArgsLength}.");
-                }
-
-                // Second, convert each supplied value to the type expected by the method
-                var suppliedArgs = new object[parameterTypes.Length];
-                var index = 0;
-                foreach (var item in jsonDocument.RootElement.EnumerateArray())
-                {
-                    var parameterType = parameterTypes[index];
-
-                    if (parameterType == typeof(JSAsyncCallResult))
-                    {
-                        // We will pass the JsonDocument instance to JAsyncCallResult and make JSRuntimeBase
-                        // responsible for disposing it.
-                        shouldDisposeJsonDocument = false;
-                        // For JS async call results, we have to defer the deserialization until
-                        // later when we know what type it's meant to be deserialized as
-                        suppliedArgs[index] = new JSAsyncCallResult(jsonDocument, item);
-                    }
-                    else if (IsIncorrectDotNetObjectRefUse(item, parameterType))
-                    {
-                        throw new InvalidOperationException($"In call to '{methodIdentifier}', parameter of type '{parameterType.Name}' at index {(index + 1)} must be declared as type 'DotNetObjectRef<{parameterType.Name}>' to receive the incoming value.");
-                    }
-                    else
-                    {
-                        suppliedArgs[index] = JsonSerializer.Deserialize(item.GetRawText(), parameterType, JsonSerializerOptionsProvider.Options);
-                    }
-
-                    index++;
-                }
-
-                if (shouldDisposeJsonDocument)
-                {
-                    jsonDocument.Dispose();
-                }
-
-                return suppliedArgs;
-            }
-            catch
-            {
-                // Always dispose the JsonDocument in case of an error.
-                jsonDocument?.Dispose();
-                throw;
+                throw new JsonException("Invalid JSON");
             }
 
-            static bool IsIncorrectDotNetObjectRefUse(JsonElement item, Type parameterType)
+            // Check if we have the right number of tokens
+            var suppliedArgsLength = 0;
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
             {
+                suppliedArgsLength++;
+                reader.Skip();
+            }
+
+            if (suppliedArgsLength != parameterTypes.Length)
+            {
+                throw new ArgumentException($"In call to '{methodIdentifier}', expected {parameterTypes.Length} parameters but received {suppliedArgsLength}.");
+            }
+
+            // Reset the reader
+            reader = new Utf8JsonReader(jsonSpan);
+            reader.Read();
+
+            var suppliedArgs = new object[parameterTypes.Length];
+
+            for (var i = 0; i < parameterTypes.Length; i++)
+            {
+                var parameterType = parameterTypes[i];
+                if (parameterType == typeof(JSAsyncCallResult))
+                {
+                    var bytesConsumed = (int)reader.BytesConsumed;
+                    // For JS async call results, we have to defer the deserialization until
+                    // later when we know what type it's meant to be deserialized as
+                    // Capture the state just prior to reading the token. The reader expects to be initialized in this state when we read the value later on.
+                    var segment = new ArraySegment<byte>(utf8JsonBytes, bytesConsumed, utf8JsonBytes.Length - bytesConsumed);
+                    suppliedArgs[i] = new JSAsyncCallResult(segment, reader.CurrentState);
+
+                    // Now read and skip the token to process the next array element.
+                    reader.Read();
+                    reader.Skip();
+                }
+                else
+                {
+                    reader.Read();
+                    var bytesConsumed = (int)reader.BytesConsumed;
+                    if (reader.TokenType == JsonTokenType.StartObject && IsIncorrectDotNetObjectRefUse(parameterType, jsonSpan.Slice(bytesConsumed), reader.CurrentState))
+                    {
+                        throw new InvalidOperationException($"In call to '{methodIdentifier}', parameter of type '{parameterType.Name}' at index {(i + 1)} must be declared as type 'DotNetObjectRef<{parameterType.Name}>' to receive the incoming value.");
+                    }
+
+                    suppliedArgs[i] = JsonSerializer.Deserialize(ref reader, parameterType, JsonSerializerOptionsProvider.Options);
+                }
+            }
+
+            if (!reader.Read() || reader.TokenType != JsonTokenType.EndArray)
+            {
+                throw new JsonException("Invalid JSON");
+            }
+
+            return suppliedArgs;
+
+            static bool IsIncorrectDotNetObjectRefUse(Type parameterType, Span<byte> utf8JsonBytes, JsonReaderState readerState)
+            {
+                var objectRefReader = new Utf8JsonReader(utf8JsonBytes, isFinalBlock: true, readerState);
+
                 // Check for incorrect use of DotNetObjectRef<T> at the top level. We know it's
                 // an incorrect use if there's a object that looks like { '__dotNetObject': <some number> },
                 // but we aren't assigning to DotNetObjectRef{T}.
-                return item.ValueKind == JsonValueKind.Object &&
-                    item.TryGetProperty(DotNetObjectRefKey.EncodedUtf8Bytes, out _) &&
-                     !typeof(IDotNetObjectRef).IsAssignableFrom(parameterType);
+                if (objectRefReader.Read() &&
+                    objectRefReader.TokenType == JsonTokenType.PropertyName &&
+                    objectRefReader.ValueTextEquals(DotNetObjectRefKey.EncodedUtf8Bytes))
+                {
+                    // The JSON payload looks has the expected shape.
+                    return !parameterType.IsGenericType || parameterType.GetGenericTypeDefinition() != typeof(DotNetObjectRef<>);
+                }
+
+                return false;
             }
         }
 

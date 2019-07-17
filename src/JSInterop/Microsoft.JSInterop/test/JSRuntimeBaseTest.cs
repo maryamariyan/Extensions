@@ -113,13 +113,14 @@ namespace Microsoft.JSInterop.Tests
             var task = runtime.InvokeAsync<string>("test identifier", Array.Empty<object>());
             Assert.False(unrelatedTask.IsCompleted);
             Assert.False(task.IsCompleted);
-            using var jsonDocument = JsonDocument.Parse("\"my result\"");
+            var bytes = Encoding.UTF8.GetBytes("\"my result\"");
+
 
             // Act/Assert: Task can be completed
             runtime.OnEndInvoke(
                 runtime.BeginInvokeCalls[1].AsyncHandle,
                 /* succeeded: */ true,
-                new JSAsyncCallResult(jsonDocument, jsonDocument.RootElement));
+                new JSAsyncCallResult(bytes, default));
             Assert.False(unrelatedTask.IsCompleted);
             Assert.True(task.IsCompleted);
             Assert.Equal("my result", task.Result);
@@ -136,13 +137,13 @@ namespace Microsoft.JSInterop.Tests
             var task = runtime.InvokeAsync<string>("test identifier", Array.Empty<object>());
             Assert.False(unrelatedTask.IsCompleted);
             Assert.False(task.IsCompleted);
-            using var jsonDocument = JsonDocument.Parse("\"This is a test exception\"");
+            var bytes = Encoding.UTF8.GetBytes("\"This is a test exception\"");
 
             // Act/Assert: Task can be failed
             runtime.OnEndInvoke(
                 runtime.BeginInvokeCalls[1].AsyncHandle,
                 /* succeeded: */ false,
-                new JSAsyncCallResult(jsonDocument, jsonDocument.RootElement));
+                new JSAsyncCallResult(bytes, default));
             Assert.False(unrelatedTask.IsCompleted);
             Assert.True(task.IsCompleted);
 
@@ -162,20 +163,17 @@ namespace Microsoft.JSInterop.Tests
             var task = runtime.InvokeAsync<int>("test identifier", Array.Empty<object>());
             Assert.False(unrelatedTask.IsCompleted);
             Assert.False(task.IsCompleted);
-            using var jsonDocument = JsonDocument.Parse("\"Not a string\"");
+            var bytes = Encoding.UTF8.GetBytes("Not a string");
 
             // Act/Assert: Task can be failed
             runtime.OnEndInvoke(
                 runtime.BeginInvokeCalls[1].AsyncHandle,
                 /* succeeded: */ true,
-                new JSAsyncCallResult(jsonDocument, jsonDocument.RootElement));
+                new JSAsyncCallResult(bytes, state: default));
             Assert.False(unrelatedTask.IsCompleted);
 
             var jsException = await Assert.ThrowsAsync<JSException>(() => task);
-            Assert.IsType<JsonException>(jsException.InnerException);
-
-            // Verify we've disposed the JsonDocument.
-            Assert.Throws<ObjectDisposedException>(() => jsonDocument.RootElement.ValueKind);
+            Assert.IsAssignableFrom<JsonException>(jsException.InnerException);
         }
 
         [Fact]
@@ -187,8 +185,11 @@ namespace Microsoft.JSInterop.Tests
             // Act/Assert
             var task = runtime.InvokeAsync<string>("test identifier", Array.Empty<object>());
             var asyncHandle = runtime.BeginInvokeCalls[0].AsyncHandle;
-            runtime.OnEndInvoke(asyncHandle, true, new JSAsyncCallResult(JsonDocument.Parse("{}"), JsonDocument.Parse("{\"Message\": \"Some data\"}").RootElement.GetProperty("Message")));
-            runtime.OnEndInvoke(asyncHandle, false, new JSAsyncCallResult(null, JsonDocument.Parse("{\"Message\": \"Exception\"}").RootElement.GetProperty("Message")));
+            var firstBytes = Encoding.UTF8.GetBytes("\"Some data\"");
+            var secondBytes = Encoding.UTF8.GetBytes("\"Exception\"");
+
+            runtime.OnEndInvoke(asyncHandle, true, new JSAsyncCallResult(firstBytes, state: default));
+            runtime.OnEndInvoke(asyncHandle, false, new JSAsyncCallResult(secondBytes, state: default));
 
             var result = await task;
             Assert.Equal("Some data", result);

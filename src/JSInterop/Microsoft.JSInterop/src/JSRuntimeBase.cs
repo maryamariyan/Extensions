@@ -141,37 +141,40 @@ namespace Microsoft.JSInterop
 
         internal void EndInvokeJS(long taskId, bool succeeded, JSAsyncCallResult asyncCallResult)
         {
-            using (asyncCallResult?.JsonDocument)
+            if (!_pendingTasks.TryRemove(taskId, out var tcs))
             {
-                if (!_pendingTasks.TryRemove(taskId, out var tcs))
-                {
-                    // We should simply return if we can't find an id for the invocation.
-                    // This likely means that the method that initiated the call defined a timeout and stopped waiting.
-                    return;
-                }
+                // We should simply return if we can't find an id for the invocation.
+                // This likely means that the method that initiated the call defined a timeout and stopped waiting.
+                return;
+            }
 
-                CleanupTasksAndRegistrations(taskId);
+            CleanupTasksAndRegistrations(taskId);
 
-                if (succeeded)
+            if (succeeded)
+            {
+                var resultType = TaskGenericsUtil.GetTaskCompletionSourceResultType(tcs);
+                try
                 {
-                    var resultType = TaskGenericsUtil.GetTaskCompletionSourceResultType(tcs);
-                    try
-                    {
-                        var result = asyncCallResult != null ?
-                            JsonSerializer.Deserialize(asyncCallResult.JsonElement.GetRawText(), resultType, JsonSerializerOptionsProvider.Options) :
-                            null;
-                        TaskGenericsUtil.SetTaskCompletionSourceResult(tcs, result);
-                    }
-                    catch (Exception exception)
-                    {
-                        var message = $"An exception occurred executing JS interop: {exception.Message}. See InnerException for more details.";
-                        TaskGenericsUtil.SetTaskCompletionSourceException(tcs, new JSException(message, exception));
-                    }
+                    var result = asyncCallResult?.DeserializeResult(resultType);
+                    TaskGenericsUtil.SetTaskCompletionSourceResult(tcs, result);
                 }
-                else
+                catch (Exception exception)
                 {
-                    var exceptionText = asyncCallResult?.JsonElement.ToString() ?? string.Empty;
+                    var message = $"An exception occurred executing JS interop: {exception.Message}. See InnerException for more details.";
+                    TaskGenericsUtil.SetTaskCompletionSourceException(tcs, new JSException(message, exception));
+                }
+            }
+            else
+            {
+                try
+                {
+                    var exceptionText = asyncCallResult?.DeserializeError() ?? string.Empty;
                     TaskGenericsUtil.SetTaskCompletionSourceException(tcs, new JSException(exceptionText));
+                }
+                catch (Exception exception)
+                {
+                    var message = $"An exception occurred executing JS interop: {exception.Message}. See InnerException for more details.";
+                    TaskGenericsUtil.SetTaskCompletionSourceException(tcs, new JSException(message, exception));
                 }
             }
         }
